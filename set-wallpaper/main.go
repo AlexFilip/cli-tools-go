@@ -1,15 +1,17 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"math/rand"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/exp/slices"
 )
@@ -34,29 +36,87 @@ func imageMagik(cmd ...string) {
 	}
 }
 
-func swayMsgCommand(cmd string) []byte {
-	dimensionCommand := exec.Command("swaymsg", "-t", cmd)
-	jsonOutput, err := dimensionCommand.StdoutPipe()
+type messageType int
+
+// Basic messages
+const (
+	IPC_COMMAND   = 0
+	IPC_SUBSCRIBE = 2
+	IPC_SEND_TICK = 10
+	IPC_SYNC      = 11
+)
+
+// Queries
+const (
+	IPC_GET_WORKSPACES    = 1
+	IPC_GET_OUTPUTS       = 3
+	IPC_GET_TREE          = 4
+	IPC_GET_MARKS         = 5
+	IPC_GET_BAR_CONFIG    = 6
+	IPC_GET_VERSION       = 7
+	IPC_GET_BINDING_MODES = 8
+	IPC_GET_CONFIG        = 9
+	IPC_GET_BINDING_STATE = 12
+
+	/* sway-specific command types */
+	IPC_GET_INPUTS = 100
+	IPC_GET_SEATS  = 101
+)
+
+// Events
+const (
+	IPC_EVENT_WORKSPACE        = ((1 << 31) | 0)
+	IPC_EVENT_OUTPUT           = ((1 << 31) | 1)
+	IPC_EVENT_MODE             = ((1 << 31) | 2)
+	IPC_EVENT_WINDOW           = ((1 << 31) | 3)
+	IPC_EVENT_BARCONFIG_UPDATE = ((1 << 31) | 4)
+	IPC_EVENT_BINDING          = ((1 << 31) | 5)
+	IPC_EVENT_SHUTDOWN         = ((1 << 31) | 6)
+	IPC_EVENT_TICK             = ((1 << 31) | 7)
+
+	/* sway-specific event types */
+	IPC_EVENT_BAR_STATE_UPDATE = ((1 << 31) | 20)
+	IPC_EVENT_INPUT            = ((1 << 31) | 21)
+)
+
+func swayMsgCommand(msgType messageType) []byte {
+	var socketPath string = os.Getenv("SWAYSOCK")
+
+	connection, err := net.Dial("unix", socketPath)
 	if err != nil {
-		fmt.Println("Error when getting stdout of swaymsg command", err)
-		os.Exit(1)
+		fmt.Println("Unable to create connection", err)
+		return []byte{}
 	}
 
-	err = dimensionCommand.Start()
+	const i3MagicString = "i3-ipc"
+
+	const IPC_HEADER_SIZE = (uintptr(len(i3MagicString)) + 2*unsafe.Sizeof(int32(0)))
+	length := int32(0)
+	var lengthAndType [8]byte
+	binary.LittleEndian.PutUint32(lengthAndType[0:4], uint32(length))
+	binary.LittleEndian.PutUint32(lengthAndType[4:8], uint32(msgType))
+
+	message := append([]byte(i3MagicString), lengthAndType[:]...)
+	connection.Write(message)
+
+	responseHeader := make([]byte, IPC_HEADER_SIZE)
+	_, err = connection.Read(responseHeader)
 	if err != nil {
-		fmt.Println("Error starting swaymsg command", err)
-		os.Exit(1)
+		fmt.Println("Error when reading response header", err)
+		return []byte{}
 	}
 
-	jsonBytes, _ := io.ReadAll(jsonOutput)
+	responseLength := binary.LittleEndian.Uint32(responseHeader[len(i3MagicString) : len(i3MagicString)+4])
+	// responseType := binary.LittleEndian.Uint32(responseHeader[len(i3MagicString)+4:])
 
-	err = dimensionCommand.Wait()
+	response := make([]byte, responseLength)
+	_, err = connection.Read(response)
 	if err != nil {
-		fmt.Println("Error executing swaymsg command", cmd, err)
-		os.Exit(1)
+		fmt.Println("Error when reading response payload", err)
+		return []byte{}
 	}
 
-	return jsonBytes
+	return response
 }
 
 type SwayTreeJSON struct {
@@ -67,7 +127,7 @@ type SwayTreeJSON struct {
 }
 
 func getScreenDimensionsSway() (int, int) {
-	jsonBytes := swayMsgCommand("get_tree")
+	jsonBytes := swayMsgCommand(IPC_GET_TREE)
 
 	var swayTreeJson SwayTreeJSON
 	err := json.Unmarshal(jsonBytes, &swayTreeJson)
@@ -86,7 +146,7 @@ type SwayOutputJSON struct {
 }
 
 func getAllOutputs() []string {
-	jsonBytes := swayMsgCommand("get_outputs")
+	jsonBytes := swayMsgCommand(IPC_GET_OUTPUTS)
 
 	var swayOutputs []SwayOutputJSON
 	err := json.Unmarshal(jsonBytes, &swayOutputs)
