@@ -167,7 +167,6 @@ func getCurrentWallpaperDirectory() []string {
 	homeDir, _ := os.UserHomeDir()
 	defaultWallpaperDirectory := homeDir + "/wallpapers"
 	result := []string{defaultWallpaperDirectory}
-
 	wallpaperParentDirFile := homeDir + "/.config/wallpaper-directories"
 
 	if _, err := os.Stat(wallpaperParentDirFile); !os.IsNotExist(err) {
