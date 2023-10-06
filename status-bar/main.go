@@ -4,15 +4,17 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	// "time"
 )
 
 type swaybarMessageHeader struct {
@@ -232,6 +234,75 @@ type blockProvider interface {
 	name() string // if this is non-empty, then it will receive click events
 	respondToClick(event clickEvent)
 }
+
+type weatherProvider struct {
+	weatherStatus string
+}
+
+func (w *weatherProvider) monitor(changeChan monitorChan) {
+	logger.Println("Weather")
+	request, err := http.NewRequest("GET", "https://wttr.in?0&T&Q", nil)
+	if err != nil {
+		logger.Println("Cannot create request", err)
+	}
+	request.Header["User-Agent"] = []string{"curl/8.0.1"}
+
+	logger.Println(request.Header)
+	client := http.Client{}
+
+	for {
+		{ // This block is so that the goto doesn't complain about jumping over a variable declaration
+			// response, err := http.Get("https://wttr.in?0&T&Q")
+			response, _ := client.Do(request)
+
+			status, err := strconv.ParseInt(response.Status[:3], 10, 32)
+			if err != nil {
+				logger.Println("Int parsing error", err)
+				goto threadSleep
+			}
+
+			if status >= 200 && status < 300 {
+				responseBodyBytes, err := io.ReadAll(response.Body)
+				if err != nil {
+					logger.Println("Error reading response body")
+					goto threadSleep
+				}
+				responseBody := string(responseBodyBytes)
+				logger.Println(responseBody)
+
+				lines := strings.SplitN(responseBody, "\n", 3)
+				firstValidCharacterIndex := 16
+				line1 := strings.Trim(lines[0][firstValidCharacterIndex:], " \n\t")
+				line2 := strings.Trim(lines[1][firstValidCharacterIndex:], " \n\t")
+				w.weatherStatus = fmt.Sprintf("%s %s", line1, line2)
+			} else {
+				w.weatherStatus = fmt.Sprintf("wttr.in status code %d", status)
+			}
+
+			changeChan <- true
+		}
+
+	threadSleep:
+		time.Sleep(1 * time.Hour)
+	}
+}
+
+func (w *weatherProvider) createBlock() fullSwaybarMessageBodyBlock {
+	var block fullSwaybarMessageBodyBlock
+
+	block.FullText = w.weatherStatus
+
+	return block
+}
+
+func (weatherProvider) name() string {
+	return ""
+}
+
+func (weatherProvider) respondToClick(event clickEvent) {
+}
+
+// ---
 
 type ipAddressProvider struct {
 	text string
@@ -513,6 +584,8 @@ func main() {
 			}
 		}
 	}()
+
+	weather := weatherProvider{}
 	ipProvider := ipAddressProvider{}
 	timeProvider := timeMonitor{}
 	ncProvider := notificationCenterMonitor{}
@@ -520,7 +593,7 @@ func main() {
 	blockProviders := []blockProvider{
 		// TODO
 		// volume
-		// weather
+		&weather,
 		// ip address
 		&ipProvider,
 		// temperature
