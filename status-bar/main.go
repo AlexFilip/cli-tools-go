@@ -92,16 +92,27 @@ type swaybarMessageHeader struct {
    └──────────────────────┴───────────────────┴────────────────────────────────────────────────────┘
 */
 
+type color int
+
+func colorToString(c color) string {
+	return fmt.Sprintf("#%02d%02d%02d", c&0xFF, (c>>8)&0xFF, (c>>16)&0xFF)
+}
+
+type borderThickness struct {
+	Top    int
+	Bottom int
+	Left   int
+	Right  int
+}
+
 type swaybarMessageBodyBlock struct {
 	FullText            string
 	ShortText           string
-	Color               string
-	Background          string
-	Border              string
-	BorderTop           int
-	BorderBottom        int
-	BorderLeft          int
-	BorderRight         int
+	shouldUseColor      byte // bits represent foreground, background and border
+	ForegroundColor     color
+	BackgroundColor     color
+	BorderColor         color
+	BorderThickness     borderThickness
 	MinWidth            int // or string whose length represents the desired width
 	Align               string
 	Name                string
@@ -151,30 +162,31 @@ func sendToSwaybar(body swaybarMessageBody) {
 	for i, y := range body {
 		var bodyBlock fullSwaybarMessageBodyBlock
 
+		// FullText is the only field that is required. Not providing it invalidates the whole block
 		bodyBlock.FullText = y.FullText
 		if y.ShortText != "" {
 			bodyBlock.ShortText = y.ShortText
 		}
-		if y.Color != "" {
-			bodyBlock.Color = y.Color
+		if (y.shouldUseColor & 0x1) != 0 {
+			bodyBlock.Color = colorToString(y.ForegroundColor)
 		}
-		if y.Background != "" {
-			bodyBlock.Background = y.Background
+		if (y.shouldUseColor & 0x2) != 0 {
+			bodyBlock.Background = colorToString(y.BackgroundColor)
 		}
-		if y.Border != "" {
-			bodyBlock.Border = y.Border
+		if (y.shouldUseColor & 0x4) != 0 {
+			bodyBlock.Border = colorToString(y.BorderColor)
 		}
-		if y.BorderTop != 0 {
-			bodyBlock.BorderTop = &y.BorderTop
+		if y.BorderThickness.Top != 0 {
+			bodyBlock.BorderTop = &y.BorderThickness.Top
 		}
-		if y.BorderBottom != 0 {
-			bodyBlock.BorderBottom = &y.BorderBottom
+		if y.BorderThickness.Bottom != 0 {
+			bodyBlock.BorderBottom = &y.BorderThickness.Bottom
 		}
-		if y.BorderLeft != 0 {
-			bodyBlock.BorderLeft = &y.BorderLeft
+		if y.BorderThickness.Left != 0 {
+			bodyBlock.BorderLeft = &y.BorderThickness.Left
 		}
-		if y.BorderRight != 0 {
-			bodyBlock.BorderRight = &y.BorderRight
+		if y.BorderThickness.Right != 0 {
+			bodyBlock.BorderRight = &y.BorderThickness.Right
 		}
 		if y.MinWidth != 0 {
 			bodyBlock.MinWidth = &y.MinWidth
@@ -184,9 +196,10 @@ func sendToSwaybar(body swaybarMessageBody) {
 		}
 		if y.Name != "" {
 			bodyBlock.Name = y.Name
-		}
-		if y.Instance != "" {
-			bodyBlock.Instance = y.Instance
+			// Only need instance if you have a name
+			if y.Instance != "" {
+				bodyBlock.Instance = y.Instance
+			}
 		}
 		if y.Urgent != false {
 			bodyBlock.Urgent = &y.Urgent
@@ -212,13 +225,49 @@ func sendToSwaybar(body swaybarMessageBody) {
 	fmt.Println(str, ",")
 }
 
-type monitorChan chan bool
+type monitorChan chan<- bool
 type blockProvider interface {
 	monitor(changeChan monitorChan)
 	createBlock() fullSwaybarMessageBodyBlock
 	name() string // if this is non-empty, then it will receive click events
 	respondToClick(event clickEvent)
 }
+
+type ipAddressProvider struct {
+	text string
+}
+
+func (ip ipAddressProvider) monitor(changeChan monitorChan) {
+	// This does not need to infinite-loop
+}
+
+func (ip *ipAddressProvider) createBlock() fullSwaybarMessageBodyBlock {
+	var block fullSwaybarMessageBodyBlock
+
+	if ip.text == "" {
+		hostnameOutput, err := exec.Command("hostname", "-I").Output()
+		if err != nil {
+			return block
+		}
+
+		localIPAddress := strings.SplitN(string(hostnameOutput), " ", 2)[0]
+		ip.text = fmt.Sprintf("IP:%s", localIPAddress)
+		logger.Println("Set text to", ip.text)
+	}
+
+	block.FullText = ip.text
+	logger.Println("Text is", ip.text)
+
+	return block
+}
+
+func (ipAddressProvider) name() string {
+	return ""
+}
+
+func (ipAddressProvider) respondToClick(clickEvent) {}
+
+// ---
 
 type timeMonitor struct{}
 
@@ -243,6 +292,8 @@ func (timeMonitor) name() string {
 }
 
 func (timeMonitor) respondToClick(event clickEvent) {}
+
+// ---
 
 type notificationCenterState int
 
@@ -300,7 +351,10 @@ func (nc *notificationCenterMonitor) monitor(changeChan monitorChan) {
 
 	for {
 		var ncStateOutput ncClientOutput
-		jsonDecoder.Decode(&ncStateOutput)
+		err = jsonDecoder.Decode(&ncStateOutput)
+		if err != nil {
+			panic(err)
+		}
 
 		oldState := nc.state
 		nc.isOpen = false
@@ -438,7 +492,7 @@ func main() {
 	}
 
 	stdinChannel := make(chan clickEvent, 1)
-	alwaysClosedStdin := make(chan clickEvent) // This channel is never written to and so it always blocks. This is in case stdinChannel is closed
+	stdinNeverWriteToMe := make(chan clickEvent) // This channel is never written to and so it always blocks. This is in case stdinChannel is closed
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
 		for {
@@ -459,13 +513,22 @@ func main() {
 			}
 		}
 	}()
-
+	ipProvider := ipAddressProvider{}
 	timeProvider := timeMonitor{}
-	ncMonitor := notificationCenterMonitor{}
+	ncProvider := notificationCenterMonitor{}
 
 	blockProviders := []blockProvider{
+		// TODO
+		// volume
+		// weather
+		// ip address
+		&ipProvider,
+		// temperature
+		// battery
+		// Bluetooth
+		// Wifi
 		timeProvider,
-		&ncMonitor,
+		&ncProvider,
 	}
 
 	providersByName := make(map[string]int)
@@ -477,8 +540,9 @@ func main() {
 	}
 
 	fullBlockValues := make([]fullSwaybarMessageBodyBlock, len(blockProviders))
-	blockChanged := make(monitorChan)
+	blockChanged := make(chan bool)
 
+	// Update swaybar with initial info so you don't have to wait until a block updates
 	go func() {
 		blockChanged <- true
 	}()
@@ -501,8 +565,9 @@ mainLoop:
 				providerIndex := providersByName[event.Name]
 				blockProviders[providerIndex].respondToClick(event)
 			} else {
-				stdinChannel = alwaysClosedStdin
+				stdinChannel = stdinNeverWriteToMe
 			}
+
 		case signal := <-signals:
 			if signal == syscall.SIGCONT {
 				logger.Println("SIGCONT")
@@ -510,17 +575,17 @@ mainLoop:
 				logger.Println("SIGSTOP")
 				break mainLoop
 			}
+
 		case <-blockChanged:
 			updateFullBlockValues(fullBlockValues, blockProviders)
-
 			bytes, err := json.Marshal(fullBlockValues)
 			if err != nil {
 				panic(err)
 			}
-
 			str := string(bytes)
 			logger.Println("Data", str)
 			fmt.Println(str, ",")
 		}
 	}
+
 }
