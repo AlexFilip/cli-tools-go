@@ -220,12 +220,9 @@ type blockProvider interface {
 	respondToClick(event clickEvent)
 }
 
-type timeMonitor struct {
-}
+type timeMonitor struct{}
 
 func (timeMonitor) monitor(changeChan monitorChan) {
-	// TODO: create timer that will fire on the minute
-
 	for {
 		t := time.Now()
 		diff := 60 - t.Second()
@@ -236,7 +233,6 @@ func (timeMonitor) monitor(changeChan monitorChan) {
 
 func (timeMonitor) createBlock() fullSwaybarMessageBodyBlock {
 	block := fullSwaybarMessageBodyBlock{}
-	// TODO: Print time to FullText
 	t := time.Now()
 	block.FullText = fmt.Sprintf("%s %s %02d, %d %d:%d", t.Weekday().String()[:3], t.Month().String()[:3], t.Day(), t.Year(), t.Hour(), t.Minute())
 	return block
@@ -441,7 +437,8 @@ func main() {
 		StopSignal:  syscall.SIGSTOP,
 	}
 
-	stdinChannel := make(chan string, 1)
+	stdinChannel := make(chan clickEvent, 1)
+	alwaysClosedStdin := make(chan clickEvent) // This channel is never written to and so it always blocks. This is in case stdinChannel is closed
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
 		for {
@@ -450,8 +447,16 @@ func main() {
 				close(stdinChannel)
 				return
 			}
-			stdinChannel <- buffer
-			// time.Sleep(1 * time.Second) // To avoid spamming stdin
+
+			trimmed := strings.Trim(buffer, " \n")
+			if trimmed == "[" {
+				// skip first [
+			} else if trimmed == "]" {
+				close(stdinChannel)
+				return
+			} else {
+				stdinChannel <- decodeClickEvent(trimmed)
+			}
 		}
 	}()
 
@@ -491,17 +496,12 @@ func main() {
 mainLoop:
 	for {
 		select {
-		case str := <-stdinChannel:
-			trimmed := strings.Trim(str, " \n")
-			if trimmed == "[" {
-				// skip first [
-			} else if trimmed == "]" {
-				// No more stdin. Stop stdin-reading goroutine?
-				// break mainLoop
-			} else {
-				event := decodeClickEvent(str)
+		case event, isOpen := <-stdinChannel:
+			if isOpen {
 				providerIndex := providersByName[event.Name]
 				blockProviders[providerIndex].respondToClick(event)
+			} else {
+				stdinChannel = alwaysClosedStdin
 			}
 		case signal := <-signals:
 			if signal == syscall.SIGCONT {
