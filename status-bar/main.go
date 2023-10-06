@@ -234,7 +234,7 @@ func (timeMonitor) monitor(changeChan monitorChan) {
 func (timeMonitor) createBlock() fullSwaybarMessageBodyBlock {
 	block := fullSwaybarMessageBodyBlock{}
 	t := time.Now()
-	block.FullText = fmt.Sprintf("%s %s %02d, %d %d:%d", t.Weekday().String()[:3], t.Month().String()[:3], t.Day(), t.Year(), t.Hour(), t.Minute())
+	block.FullText = fmt.Sprintf("%s %s %02d, %d %02d:%02d", t.Weekday().String()[:3], t.Month().String()[:3], t.Day(), t.Year(), t.Hour(), t.Minute())
 	return block
 }
 
