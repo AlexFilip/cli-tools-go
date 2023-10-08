@@ -18,6 +18,8 @@ func colorToString(c color) string {
 	return fmt.Sprintf("#%02d%02d%02d", c&0xFF, (c>>8)&0xFF, (c>>16)&0xFF)
 }
 
+type swaybarMessageBody []swaybarMessageBodyBlock
+
 type swaybarMessageBodyBlock struct {
 	FullText            string
 	ShortText           string

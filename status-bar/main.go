@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// "golang.org/x/sys/unix"
 )
 
 type swaybarMessageHeader struct {
@@ -27,7 +28,7 @@ type swaybarMessageHeader struct {
 func sendHeader(header swaybarMessageHeader) {
 	bytes, err := json.Marshal(header)
 	if err != nil {
-		panic(err)
+		logger.Panic(err)
 	}
 	fmt.Println(string(bytes))
 }
@@ -103,29 +104,24 @@ func sendHeader(header swaybarMessageHeader) {
 */
 
 type fullSwaybarMessageBodyBlock struct {
-	FullText     string `json:"full_text"`
-	ShortText    string `json:"short_text,omitempty"`
-	Color        string `json:"color,omitempty"`
-	Background   string `json:"background,omitempty"`
-	Border       string `json:"border,omitempty"`
-	BorderTop    *int   `json:"border_top,omitempty"`
-	BorderBottom *int   `json:"border_bottom,omitempty"`
-	BorderLeft   *int   `json:"border_left,omitempty"`
-	BorderRight  *int   `json:"border_right,omitempty"`
-	MinWidth     *int   `json:"min_width,omitempty"` // or string whose length represents the desired width
-	Align        string `json:"align,omitempty"`
-
-	// blocks that respond to clicks should have a unique Name-Instance pair. Only name is needed to respond to clicks
-	Name     string `json:"name,omitempty"`     // needed to receive click events
-	Instance string `json:"instance,omitempty"` // Also identifies a clicker
-
+	FullText            string `json:"full_text"`
+	ShortText           string `json:"short_text,omitempty"`
+	Color               string `json:"color,omitempty"`
+	Background          string `json:"background,omitempty"`
+	Border              string `json:"border,omitempty"`
+	BorderTop           *int   `json:"border_top,omitempty"`
+	BorderBottom        *int   `json:"border_bottom,omitempty"`
+	BorderLeft          *int   `json:"border_left,omitempty"`
+	BorderRight         *int   `json:"border_right,omitempty"`
+	MinWidth            *int   `json:"min_width,omitempty"` // or string whose length represents the desired width
+	Align               string `json:"align,omitempty"`
+	Name                string `json:"name,omitempty"`     // needed to receive click events
+	Instance            string `json:"instance,omitempty"` // Click event receivers should have a unique Name-Instance pair
 	Urgent              *bool  `json:"urgent,omitempty"`
 	Separator           *bool  `json:"separator,omitempty"`
 	SeparatorBlockWidth *int   `json:"separator_block_width,omitempty"`
 	Markup              string `json:"markup,omitempty"`
 }
-
-type swaybarMessageBody []swaybarMessageBodyBlock
 
 type monitorChan chan<- bool
 type blockProvider interface {
@@ -135,19 +131,111 @@ type blockProvider interface {
 	respondToClick(event clickEvent)
 }
 
+// Can't use SIGRTMIN for some reason
+const VOLUME_CHANGED_SIGNAL = syscall.SIGUSR1
+
+type volumeProvider struct {
+	leftMuted   bool
+	leftVolume  int
+	rightMuted  bool
+	rightVolume int
+}
+
+func (vol *volumeProvider) updateVolume() {
+
+	volAndMuted := func(line string) (int, bool) {
+		numIndex := strings.Index(line, "[") + 1
+		percentIndex := strings.Index(line, "%")
+		volume, err := strconv.Atoi(line[numIndex:percentIndex])
+		if err != nil {
+			logger.Panic(err)
+		}
+
+		lineAfterNum := line[percentIndex+2:]
+		mutedIndex := strings.Index(lineAfterNum, "[") + 1
+		closeBracketIndex := strings.Index(lineAfterNum, "]") + 1
+		isMuted := lineAfterNum[mutedIndex:closeBracketIndex] == "off"
+
+		return volume, isMuted
+	}
+
+	logger.Println("Updating volume")
+
+	output, err := exec.Command("amixer", "get", "Master").Output()
+	if err != nil {
+		logger.Panic(err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	logger.Println("Num lines", len(lines))
+	lines = lines[len(lines)-3:]
+
+	logger.Println("Lines = ", lines)
+	logger.Println("Getting left")
+	vol.leftVolume, vol.leftMuted = volAndMuted(lines[0])
+	logger.Println("Getting right")
+	vol.rightVolume, vol.rightMuted = volAndMuted(lines[1])
+	logger.Println("Getting got both", vol.leftVolume, vol.rightVolume, vol.leftMuted, vol.rightMuted)
+}
+
+func (vol *volumeProvider) monitor(changeChan monitorChan) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, VOLUME_CHANGED_SIGNAL)
+	vol.updateVolume()
+
+	for {
+		logger.Printf("Waiting for %s", VOLUME_CHANGED_SIGNAL.String())
+		sig := <-signals
+		logger.Println("Got signal", sig)
+		if sig == VOLUME_CHANGED_SIGNAL {
+			vol.updateVolume()
+			logger.Println("Sent signal")
+			changeChan <- true
+		}
+	}
+}
+
+func (vol *volumeProvider) createBlock() fullSwaybarMessageBodyBlock {
+	getVolumeString := func(vol int, muted bool) string {
+		if muted {
+			return " mute"
+		}
+		return fmt.Sprintf(" %d%%", vol)
+	}
+
+	var block fullSwaybarMessageBodyBlock
+
+	if vol.leftMuted != vol.rightMuted || vol.leftVolume != vol.rightVolume {
+		block.FullText = fmt.Sprintf("L:%s R:%s", getVolumeString(vol.leftVolume, vol.leftMuted), getVolumeString(vol.rightVolume, vol.rightMuted))
+	} else {
+		block.FullText = getVolumeString(vol.leftVolume, vol.leftMuted)
+	}
+
+	return block
+}
+
+func (vol *volumeProvider) name() string {
+	return "volume"
+}
+
+func (vol *volumeProvider) respondToClick(event clickEvent) {
+	// TODO: Make a window with volume controls pop up
+	exec.Command("alacritty", "--class", "alsamixer", "-e", "alsamixer").Run()
+}
+
+// ---
+
 type weatherProvider struct {
 	weatherStatus string
 }
 
 func (w *weatherProvider) monitor(changeChan monitorChan) {
-	logger.Println("Weather")
 	request, err := http.NewRequest("GET", "https://wttr.in?0&T&Q", nil)
 	if err != nil {
 		logger.Println("Cannot create request", err)
 	}
 	request.Header["User-Agent"] = []string{"curl/8.0.1"}
 
-	logger.Println(request.Header)
 	client := http.Client{}
 
 	for {
@@ -223,20 +311,41 @@ func (ip *ipAddressProvider) createBlock() fullSwaybarMessageBodyBlock {
 
 		localIPAddress := strings.SplitN(string(hostnameOutput), " ", 2)[0]
 		ip.text = fmt.Sprintf("IP:%s", localIPAddress)
-		logger.Println("Set text to", ip.text)
 	}
 
 	block.FullText = ip.text
-	logger.Println("Text is", ip.text)
 
 	return block
 }
 
 func (ipAddressProvider) name() string {
+	return "network"
+}
+
+func (ipAddressProvider) respondToClick(event clickEvent) {
+	exec.Command("alacritty", "--class", "network_manager", "-e", "nmtui").Run()
+}
+
+// ---
+
+type temperatureProvider struct {
+}
+
+func (vol *temperatureProvider) monitor(changeChan monitorChan) {
+}
+
+func (vol *temperatureProvider) createBlock() fullSwaybarMessageBodyBlock {
+	// /Core/ { X=substr($3, 2, 4)+0; if(X > M) M = X } END { print "  " M " °C " }
+	var block fullSwaybarMessageBodyBlock
+
+	return block
+}
+
+func (vol *temperatureProvider) name() string {
 	return ""
 }
 
-func (ipAddressProvider) respondToClick(clickEvent) {}
+func (vol *temperatureProvider) respondToClick(event clickEvent) {}
 
 // ---
 
@@ -315,7 +424,7 @@ func (nc *notificationCenterMonitor) monitor(changeChan monitorChan) {
 	ncMonitor := exec.Command("swaync-client", "-swb")
 	stdout, err := ncMonitor.StdoutPipe()
 	if err != nil {
-		panic(err)
+		logger.Panic(err)
 	}
 	jsonDecoder := json.NewDecoder(stdout)
 	ncMonitor.Start()
@@ -324,7 +433,7 @@ func (nc *notificationCenterMonitor) monitor(changeChan monitorChan) {
 		var ncStateOutput ncClientOutput
 		err = jsonDecoder.Decode(&ncStateOutput)
 		if err != nil {
-			panic(err)
+			logger.Panic(err)
 		}
 
 		oldState := nc.state
@@ -367,34 +476,34 @@ func (nc *notificationCenterMonitor) createBlock() fullSwaybarMessageBodyBlock {
 }
 
 /*
-	┌───────────┬───────────┬────────────────────────────────────────────────────┐
-	│ PROPERTY  │ DATA TYPE │                    DESCRIPTION                     │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│   name    │  string   │ The name of the block, if set                      │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│ instance  │  string   │ The instance of the block, if set                  │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│    x      │  integer  │ The x location that the click occurred at          │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│    y      │  integer  │ The y location that the click occurred at          │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│  button   │  integer  │ The x11 button number for the click. If the button │
-	│           │           │ does not have an x11 button mapping, this will be  │
-	│           │           │ 0.                                                 │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│  event    │  integer  │ The event code that corresponds to the button for  │
-	│           │           │ the click                                          │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│relative_x │  integer  │ The x location of the click relative to the top-   │
-	│           │           │ left of the block                                  │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│relative_y │  integer  │ The y location of the click relative to the top-   │
-	│           │           │ left of the block                                  │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│  width    │  integer  │ The width of the block in pixels                   │
-	├───────────┼───────────┼────────────────────────────────────────────────────┤
-	│  height   │  integer  │ The height of the block in pixels                  │
-	└───────────┴───────────┴────────────────────────────────────────────────────┘
+┌───────────┬───────────┬────────────────────────────────────────────────────┐
+│ PROPERTY  │ DATA TYPE │                    DESCRIPTION                     │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│   name    │  string   │ The name of the block, if set                      │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│ instance  │  string   │ The instance of the block, if set                  │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│    x      │  integer  │ The x location that the click occurred at          │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│    y      │  integer  │ The y location that the click occurred at          │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│  button   │  integer  │ The x11 button number for the click. If the button │
+│           │           │ does not have an x11 button mapping, this will be  │
+│           │           │ 0.                                                 │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│  event    │  integer  │ The event code that corresponds to the button for  │
+│           │           │ the click                                          │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│relative_x │  integer  │ The x location of the click relative to the top-   │
+│           │           │ left of the block                                  │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│relative_y │  integer  │ The y location of the click relative to the top-   │
+│           │           │ left of the block                                  │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│  width    │  integer  │ The width of the block in pixels                   │
+├───────────┼───────────┼────────────────────────────────────────────────────┤
+│  height   │  integer  │ The height of the block in pixels                  │
+└───────────┴───────────┴────────────────────────────────────────────────────┘
 */
 
 type clickEvent struct {
@@ -419,7 +528,7 @@ func decodeClickEvent(eventString string) clickEvent {
 
 	err := json.Unmarshal([]byte(eventString), &result)
 	if err != nil {
-		panic(err)
+		logger.Panic(err)
 	}
 
 	return result
@@ -440,7 +549,7 @@ var logger *log.Logger
 func main() {
 	path, err := os.Executable()
 	if err != nil {
-		panic(err)
+		logger.Panic(err)
 	}
 
 	directory := filepath.Dir(path)
@@ -450,7 +559,7 @@ func main() {
 	logsFile.Truncate(0)
 
 	if err != nil {
-		panic(err)
+		logger.Panic(err)
 	}
 
 	logger = log.New(logsFile, "", 0)
@@ -485,6 +594,7 @@ func main() {
 		}
 	}()
 
+	volume := volumeProvider{}
 	weather := weatherProvider{}
 	ipProvider := ipAddressProvider{}
 	timeProvider := timeMonitor{}
@@ -492,9 +602,8 @@ func main() {
 
 	blockProviders := []blockProvider{
 		// TODO
-		// volume
+		&volume,
 		&weather,
-		// ip address
 		&ipProvider,
 		// temperature
 		// battery
@@ -553,7 +662,7 @@ mainLoop:
 			updateFullBlockValues(fullBlockValues, blockProviders)
 			bytes, err := json.Marshal(fullBlockValues)
 			if err != nil {
-				panic(err)
+				logger.Panic(err)
 			}
 			str := string(bytes)
 			logger.Println("Data", str)
