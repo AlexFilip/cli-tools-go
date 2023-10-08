@@ -123,9 +123,12 @@ type fullSwaybarMessageBodyBlock struct {
 	Markup              string `json:"markup,omitempty"`
 }
 
-type monitorChan chan<- bool
+type blockChangedMessage struct {
+	index int
+}
+
 type blockProvider interface {
-	monitor(changeChan monitorChan)
+	monitor(changeChan chan<- blockChangedMessage, index int)
 	createBlock() fullSwaybarMessageBodyBlock
 	name() string // if this is non-empty, then it will receive click events
 	respondToClick(event clickEvent)
@@ -170,7 +173,7 @@ func (vol *volumeProvider) updateVolume() {
 	vol.rightVolume, vol.rightMuted = volAndMuted(lines[1])
 }
 
-func (vol *volumeProvider) monitor(changeChan monitorChan) {
+func (vol *volumeProvider) monitor(changeChan chan<- blockChangedMessage, index int) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, VOLUME_CHANGED_SIGNAL)
 	vol.updateVolume()
@@ -178,8 +181,14 @@ func (vol *volumeProvider) monitor(changeChan monitorChan) {
 	for {
 		sig := <-signals
 		if sig == VOLUME_CHANGED_SIGNAL {
+			leftVol, leftMute, rightVol, rightMute := vol.leftVolume, vol.leftMuted, vol.rightVolume, vol.rightMuted
 			vol.updateVolume()
-			changeChan <- true
+
+			if vol.leftVolume != leftVol || vol.leftMuted != leftMute || vol.rightVolume != rightVol || vol.rightMuted != rightMute {
+				changeChan <- blockChangedMessage{
+					index: index,
+				}
+			}
 		}
 	}
 }
@@ -217,10 +226,11 @@ type weatherProvider struct {
 	weatherStatus string
 }
 
-func (w *weatherProvider) monitor(changeChan monitorChan) {
+func (w *weatherProvider) monitor(changeChan chan<- blockChangedMessage, index int) {
 	request, err := http.NewRequest("GET", "https://wttr.in?0&T&Q", nil)
 	if err != nil {
 		logger.Println("Cannot create request", err)
+		return
 	}
 	request.Header["User-Agent"] = []string{"curl/8.0.1"}
 
@@ -255,7 +265,9 @@ func (w *weatherProvider) monitor(changeChan monitorChan) {
 				w.weatherStatus = fmt.Sprintf("wttr.in status code %d", status)
 			}
 
-			changeChan <- true
+			changeChan <- blockChangedMessage{
+				index: index,
+			}
 		}
 
 	threadSleep:
@@ -284,7 +296,7 @@ type ipAddressProvider struct {
 	text string
 }
 
-func (ip ipAddressProvider) monitor(changeChan monitorChan) {
+func (ip ipAddressProvider) monitor(changeChan chan<- blockChangedMessage, index int) {
 	// This does not need to infinite-loop
 }
 
@@ -320,7 +332,7 @@ type temperatureProvider struct {
 	text string
 }
 
-func (temp *temperatureProvider) monitor(changeChan monitorChan) {
+func (temp *temperatureProvider) monitor(changeChan chan<- blockChangedMessage, index int) {
 	for {
 		sensorInfo, err := exec.Command("sensors").Output()
 		if err != nil {
@@ -352,7 +364,9 @@ func (temp *temperatureProvider) monitor(changeChan monitorChan) {
 
 		if temp.text != maxString {
 			temp.text = maxString
-			changeChan <- true
+			changeChan <- blockChangedMessage{
+				index: index,
+			}
 		}
 
 		time.Sleep(1 * time.Minute)
@@ -378,12 +392,14 @@ func (temp *temperatureProvider) respondToClick(event clickEvent) {}
 
 type timeMonitor struct{}
 
-func (timeMonitor) monitor(changeChan monitorChan) {
+func (timeMonitor) monitor(changeChan chan<- blockChangedMessage, index int) {
 	for {
 		t := time.Now()
 		diff := 60 - t.Second()
 		time.Sleep(time.Duration(diff) * time.Second)
-		changeChan <- true
+		changeChan <- blockChangedMessage{
+			index: index,
+		}
 	}
 }
 
@@ -447,7 +463,7 @@ type ncClientOutput struct {
 	Class any `json:"class"`
 }
 
-func (nc *notificationCenterMonitor) monitor(changeChan monitorChan) {
+func (nc *notificationCenterMonitor) monitor(changeChan chan<- blockChangedMessage, index int) {
 	ncMonitor := exec.Command("swaync-client", "-swb")
 	stdout, err := ncMonitor.StdoutPipe()
 	if err != nil {
@@ -477,7 +493,10 @@ func (nc *notificationCenterMonitor) monitor(changeChan monitorChan) {
 		// logger.Printf("Got class %g (T = %T) | Changed state to %v | isOpen to %t", ncStateOutput.Class, ncStateOutput.Class, nc.state, nc.isOpen)
 		// I don't think there's a reason to change the icon if the notification center is open
 		if oldState != nc.state {
-			changeChan <- true
+			changeChan <- blockChangedMessage{
+				index: index,
+			}
+
 		}
 	}
 }
@@ -561,46 +580,98 @@ func decodeClickEvent(eventString string) clickEvent {
 	return result
 }
 
+func updateSingleBlock(fullBlockValues []fullSwaybarMessageBodyBlock, index int, provider blockProvider) {
+	fullBlock := provider.createBlock()
+
+	// Set name here to make sure that it responds to clicks if it needs to
+	fullBlock.Name = provider.name()
+	fullBlockValues[index] = fullBlock
+}
+
 func updateFullBlockValues(fullBlockValues []fullSwaybarMessageBodyBlock, blockProviders []blockProvider) {
 	for i, provider := range blockProviders {
-		fullBlock := provider.createBlock()
-
-		// Set name here to make sure that it responds to clicks if it needs to
-		fullBlock.Name = provider.name()
-		fullBlockValues[i] = fullBlock
+		updateSingleBlock(fullBlockValues, i, provider)
 	}
 }
 
-var logger *log.Logger
+func displayStatusBar(fullBlockValues []fullSwaybarMessageBodyBlock, blockProviders []blockProvider, indexToUpdate int) {
+	if indexToUpdate < 0 {
+		logger.Println("Updating all blocks")
+		updateFullBlockValues(fullBlockValues, blockProviders)
+	} else {
+		logger.Println("Updating block", indexToUpdate)
+		updateSingleBlock(fullBlockValues, indexToUpdate, blockProviders[indexToUpdate])
+	}
 
-func main() {
-	path, err := os.Executable()
+	bytes, err := json.Marshal(fullBlockValues)
 	if err != nil {
 		logger.Panic(err)
 	}
+	str := string(bytes)
+	logger.Println("Data", str)
+	fmt.Println(str, ",")
+}
 
-	directory := filepath.Dir(path)
-	logsPath := filepath.Join(directory, "logs.txt")
-	logsFile, err := os.OpenFile(logsPath, os.O_RDWR|os.O_CREATE, 0644)
-	defer logsFile.Close()
-	logsFile.Truncate(0)
-
-	if err != nil {
-		logger.Panic(err)
-	}
-
-	logger = log.New(logsFile, "", 0)
-
-	defaultHeader := swaybarMessageHeader{
+func defaultHeader() swaybarMessageHeader {
+	result := swaybarMessageHeader{
 		Version:     1,
 		ClickEvents: true,
 		ContSignal:  syscall.SIGCONT,
 		StopSignal:  syscall.SIGSTOP,
 	}
 
+	return result
+}
+
+func mainLoop(stdinChannel <-chan clickEvent, blockChanged <-chan blockChangedMessage, blockProviders []blockProvider) {
+	stdinNeverWriteToMe := make(<-chan clickEvent) // This channel is never written to and so it always blocks. This is in case stdinChannel is closed
+	fullBlockValues := make([]fullSwaybarMessageBodyBlock, len(blockProviders))
+
+	providersByName := make(map[string]int)
+	for i, block := range blockProviders {
+		name := block.name()
+		if name != "" {
+			providersByName[name] = i
+		}
+	}
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGCONT, syscall.SIGSTOP)
+
+	header := defaultHeader()
+
+	sendHeader(header)
+	fmt.Print("[")
+
+	displayStatusBar(fullBlockValues, blockProviders, -1)
+
+	for {
+		select {
+		case event, isOpen := <-stdinChannel:
+			if isOpen {
+				providerIndex := providersByName[event.Name]
+				blockProviders[providerIndex].respondToClick(event)
+			} else {
+				stdinChannel = stdinNeverWriteToMe
+			}
+
+		case signal := <-signals:
+			if signal == syscall.SIGCONT {
+				logger.Println("SIGCONT")
+			} else if signal == syscall.SIGSTOP {
+				logger.Println("SIGSTOP")
+				return
+			}
+
+		case changeInfo := <-blockChanged:
+			displayStatusBar(fullBlockValues, blockProviders, changeInfo.index)
+		}
+	}
+}
+
+func setupStdinReader() <-chan clickEvent {
 	stdinChannel := make(chan clickEvent, 1)
-	stdinNeverWriteToMe := make(chan clickEvent) // This channel is never written to and so it always blocks. This is in case stdinChannel is closed
-	go func() {
+	go func(stdinChannel chan<- clickEvent) {
 		reader := bufio.NewReader(os.Stdin)
 		for {
 			buffer, err := reader.ReadString('\n')
@@ -619,7 +690,45 @@ func main() {
 				stdinChannel <- decodeClickEvent(trimmed)
 			}
 		}
-	}()
+	}(stdinChannel)
+
+	return stdinChannel
+}
+
+func setupBlockChangeNotifier(blockProviders []blockProvider) <-chan blockChangedMessage {
+	blockChanged := make(chan blockChangedMessage)
+
+	// Update swaybar with initial info so you don't have to wait until a block updates
+	for index, block := range blockProviders {
+		go block.monitor(blockChanged, index)
+	}
+
+	return blockChanged
+}
+
+var logger *log.Logger
+
+func setupLogger() *os.File {
+	path, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+
+	directory := filepath.Dir(path)
+	logsPath := filepath.Join(directory, "logs.txt")
+	logsFile, err := os.OpenFile(logsPath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		panic(err)
+	}
+	logsFile.Truncate(0)
+
+	logger = log.New(logsFile, "", 0)
+	return logsFile
+}
+
+func main() {
+	logsFile := setupLogger()
+	defer logsFile.Close()
 
 	volume := volumeProvider{}
 	weather := weatherProvider{}
@@ -635,66 +744,12 @@ func main() {
 		&temperature,
 		// battery
 		// Bluetooth
-		// Wifi
 		timeProvider,
 		&ncProvider,
 	}
 
-	providersByName := make(map[string]int)
-	for i, block := range blockProviders {
-		name := block.name()
-		if name != "" {
-			providersByName[name] = i
-		}
-	}
+	stdinChannel := setupStdinReader()
+	blockChanged := setupBlockChangeNotifier(blockProviders)
 
-	fullBlockValues := make([]fullSwaybarMessageBodyBlock, len(blockProviders))
-	blockChanged := make(chan bool)
-
-	// Update swaybar with initial info so you don't have to wait until a block updates
-	go func() {
-		blockChanged <- true
-	}()
-
-	for _, block := range blockProviders {
-		go block.monitor(blockChanged)
-	}
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGCONT, syscall.SIGSTOP)
-
-	sendHeader(defaultHeader)
-	fmt.Print("[")
-
-mainLoop:
-	for {
-		select {
-		case event, isOpen := <-stdinChannel:
-			if isOpen {
-				providerIndex := providersByName[event.Name]
-				blockProviders[providerIndex].respondToClick(event)
-			} else {
-				stdinChannel = stdinNeverWriteToMe
-			}
-
-		case signal := <-signals:
-			if signal == syscall.SIGCONT {
-				logger.Println("SIGCONT")
-			} else if signal == syscall.SIGSTOP {
-				logger.Println("SIGSTOP")
-				break mainLoop
-			}
-
-		case <-blockChanged:
-			updateFullBlockValues(fullBlockValues, blockProviders)
-			bytes, err := json.Marshal(fullBlockValues)
-			if err != nil {
-				logger.Panic(err)
-			}
-			str := string(bytes)
-			logger.Println("Data", str)
-			fmt.Println(str, ",")
-		}
-	}
-
+	mainLoop(stdinChannel, blockChanged, blockProviders)
 }
