@@ -142,7 +142,6 @@ type volumeProvider struct {
 }
 
 func (vol *volumeProvider) updateVolume() {
-
 	volAndMuted := func(line string) (int, bool) {
 		numIndex := strings.Index(line, "[") + 1
 		percentIndex := strings.Index(line, "%")
@@ -159,23 +158,16 @@ func (vol *volumeProvider) updateVolume() {
 		return volume, isMuted
 	}
 
-	logger.Println("Updating volume")
-
 	output, err := exec.Command("amixer", "get", "Master").Output()
 	if err != nil {
 		logger.Panic(err)
 	}
 
 	lines := strings.Split(string(output), "\n")
-	logger.Println("Num lines", len(lines))
 	lines = lines[len(lines)-3:]
 
-	logger.Println("Lines = ", lines)
-	logger.Println("Getting left")
 	vol.leftVolume, vol.leftMuted = volAndMuted(lines[0])
-	logger.Println("Getting right")
 	vol.rightVolume, vol.rightMuted = volAndMuted(lines[1])
-	logger.Println("Getting got both", vol.leftVolume, vol.rightVolume, vol.leftMuted, vol.rightMuted)
 }
 
 func (vol *volumeProvider) monitor(changeChan monitorChan) {
@@ -184,12 +176,9 @@ func (vol *volumeProvider) monitor(changeChan monitorChan) {
 	vol.updateVolume()
 
 	for {
-		logger.Printf("Waiting for %s", VOLUME_CHANGED_SIGNAL.String())
 		sig := <-signals
-		logger.Println("Got signal", sig)
 		if sig == VOLUME_CHANGED_SIGNAL {
 			vol.updateVolume()
-			logger.Println("Sent signal")
 			changeChan <- true
 		}
 	}
@@ -205,10 +194,10 @@ func (vol *volumeProvider) createBlock() fullSwaybarMessageBodyBlock {
 
 	var block fullSwaybarMessageBodyBlock
 
-	if vol.leftMuted != vol.rightMuted || vol.leftVolume != vol.rightVolume {
-		block.FullText = fmt.Sprintf("L:%s R:%s", getVolumeString(vol.leftVolume, vol.leftMuted), getVolumeString(vol.rightVolume, vol.rightMuted))
-	} else {
+	if vol.leftMuted == vol.rightMuted || vol.leftVolume == vol.rightVolume {
 		block.FullText = getVolumeString(vol.leftVolume, vol.leftMuted)
+	} else {
+		block.FullText = fmt.Sprintf("L:%s R:%s", getVolumeString(vol.leftVolume, vol.leftMuted), getVolumeString(vol.rightVolume, vol.rightMuted))
 	}
 
 	return block
