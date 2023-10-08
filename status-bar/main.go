@@ -329,23 +329,62 @@ func (ipAddressProvider) respondToClick(event clickEvent) {
 // ---
 
 type temperatureProvider struct {
+	text string
 }
 
-func (vol *temperatureProvider) monitor(changeChan monitorChan) {
+func (temp *temperatureProvider) monitor(changeChan monitorChan) {
+	for {
+		sensorInfo, err := exec.Command("sensors").Output()
+		if err != nil {
+			logger.Panic(err)
+		}
+
+		maxNum := 0
+		maxString := ""
+		for _, line := range strings.Split(string(sensorInfo), "\n") {
+			if strings.HasPrefix(line, "Core") {
+				numIndex := strings.Index(line, "+") + 1
+				line = line[numIndex:]
+
+				numEndIndex := strings.Index(line, ".")
+				cIndex := strings.Index(line, "C") + 1
+
+				num, err := strconv.Atoi(line[:numEndIndex])
+				if err != nil {
+					logger.Panic(err)
+				}
+
+				if num > maxNum {
+					maxNum = num
+					maxString = line[:cIndex]
+				}
+
+			}
+		}
+
+		if temp.text != maxString {
+			temp.text = maxString
+			changeChan <- true
+		}
+
+		time.Sleep(1 * time.Minute)
+	}
 }
 
-func (vol *temperatureProvider) createBlock() fullSwaybarMessageBodyBlock {
+func (temp *temperatureProvider) createBlock() fullSwaybarMessageBodyBlock {
 	// /Core/ { X=substr($3, 2, 4)+0; if(X > M) M = X } END { print "  " M " °C " }
 	var block fullSwaybarMessageBodyBlock
+
+	block.FullText = "  " + temp.text
 
 	return block
 }
 
-func (vol *temperatureProvider) name() string {
+func (temp *temperatureProvider) name() string {
 	return ""
 }
 
-func (vol *temperatureProvider) respondToClick(event clickEvent) {}
+func (temp *temperatureProvider) respondToClick(event clickEvent) {}
 
 // ---
 
@@ -597,15 +636,15 @@ func main() {
 	volume := volumeProvider{}
 	weather := weatherProvider{}
 	ipProvider := ipAddressProvider{}
+	temperature := temperatureProvider{}
 	timeProvider := timeMonitor{}
 	ncProvider := notificationCenterMonitor{}
 
 	blockProviders := []blockProvider{
-		// TODO
 		&volume,
 		&weather,
 		&ipProvider,
-		// temperature
+		&temperature,
 		// battery
 		// Bluetooth
 		// Wifi
