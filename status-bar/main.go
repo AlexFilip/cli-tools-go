@@ -152,7 +152,7 @@ func (vol *volumeProvider) updateVolume() {
 
 		lineAfterNum := line[percentIndex+2:]
 		mutedIndex := strings.Index(lineAfterNum, "[") + 1
-		closeBracketIndex := strings.Index(lineAfterNum, "]") + 1
+		closeBracketIndex := strings.Index(lineAfterNum, "]")
 		isMuted := lineAfterNum[mutedIndex:closeBracketIndex] == "off"
 
 		return volume, isMuted
@@ -208,7 +208,6 @@ func (vol *volumeProvider) name() string {
 }
 
 func (vol *volumeProvider) respondToClick(event clickEvent) {
-	// TODO: Make a window with volume controls pop up
 	exec.Command("alacritty", "--class", "alsamixer", "-e", "alsamixer").Run()
 }
 
