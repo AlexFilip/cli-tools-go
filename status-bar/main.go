@@ -676,8 +676,11 @@ func setupStdinReader() <-chan clickEvent {
 		for {
 			buffer, err := reader.ReadString('\n')
 			if err != nil { // Maybe log non io.EOF errors, if you want
-				close(stdinChannel)
-				return
+				if err == io.EOF {
+					close(stdinChannel)
+					break
+				}
+				panic(err)
 			}
 
 			trimmed := strings.Trim(buffer, " \n")
