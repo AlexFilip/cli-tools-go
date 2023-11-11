@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"os"
@@ -80,22 +79,20 @@ const (
 )
 
 func swayMsgCommand(msgType messageType) []byte {
-	var socketPath string = os.Getenv("SWAYSOCK")
+	const i3MagicString = "i3-ipc"
+	const IPC_HEADER_SIZE = (uintptr(len(i3MagicString)) + 2*unsafe.Sizeof(int32(0)))
 
+	var socketPath string = os.Getenv("SWAYSOCK")
 	connection, err := net.Dial("unix", socketPath)
 	if err != nil {
 		fmt.Println("Unable to create connection", err)
 		return []byte{}
 	}
 
-	const i3MagicString = "i3-ipc"
-
-	const IPC_HEADER_SIZE = (uintptr(len(i3MagicString)) + 2*unsafe.Sizeof(int32(0)))
 	length := int32(0)
 	var lengthAndType [8]byte
 	binary.LittleEndian.PutUint32(lengthAndType[0:4], uint32(length))
 	binary.LittleEndian.PutUint32(lengthAndType[4:8], uint32(msgType))
-
 	message := append([]byte(i3MagicString), lengthAndType[:]...)
 	connection.Write(message)
 
@@ -163,10 +160,10 @@ func getAllOutputs() []string {
 	return outputNames
 }
 
-func getCurrentWallpaperDirectory() []string {
+func getCurrentWallpaperDirectories() []string {
 	homeDir, _ := os.UserHomeDir()
 	defaultWallpaperDirectory := homeDir + "/wallpapers"
-	result := []string{defaultWallpaperDirectory}
+	result := []string{}
 	wallpaperParentDirFile := homeDir + "/.config/wallpaper-directories"
 
 	if _, err := os.Stat(wallpaperParentDirFile); !os.IsNotExist(err) {
@@ -185,18 +182,21 @@ func getCurrentWallpaperDirectory() []string {
 					// Soft error, fallback to default
 					fmt.Println("Could not find directory at", path,
 						"Read from", wallpaperParentDirFile,
-						"falling back to default path:", defaultWallpaperDirectory,
 						"original error:", err)
 				}
 			}
 		}
 	}
 
+	if len(result) == 0 {
+		result = []string{defaultWallpaperDirectory}
+	}
+
 	return result
 }
 
 func getAllWallpaperPaths(parentDir string, result *[]string) []string {
-	files, err := ioutil.ReadDir(parentDir)
+	files, err := os.ReadDir(parentDir)
 	if err != nil {
 		fmt.Println("Error when reading wallpaper directory", err)
 		os.Exit(1)
@@ -259,11 +259,11 @@ func setWallpaperForScreen(screen string, wallpaper string) {
 
 func main() {
 	outputs := getAllOutputs()
-	wallpaperDir := getCurrentWallpaperDirectory()
+	wallpaperDirs := getCurrentWallpaperDirectories()
 
 	wallpapers := []string{}
-	for _, wallpaper := range wallpaperDir {
-		getAllWallpaperPaths(wallpaper, &wallpapers)
+	for _, dir := range wallpaperDirs {
+		getAllWallpaperPaths(dir, &wallpapers)
 	}
 
 	homeDir, _ := os.UserHomeDir()
