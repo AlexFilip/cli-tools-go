@@ -119,46 +119,45 @@ func swayMsgCommand(msgType messageType, payload string) []byte {
 	return response
 }
 
-type SwayTreeJSON struct {
-	Dimensions struct {
-		Height int `json:"height"`
+// type SwayTreeJSON struct {
+// 	Dimensions struct {
+// 		Height int `json:"height"`
+// 		Width  int `json:"width"`
+// 	} `json:"rect"`
+// }
+//
+// func getScreenDimensionsSway() (int, int) {
+// 	jsonBytes := swayMsgCommand(IPC_GET_TREE, "")
+//
+// 	var swayTreeJson SwayTreeJSON
+// 	err := json.Unmarshal(jsonBytes, &swayTreeJson)
+// 	if err != nil {
+// 		fmt.Println("Json parse error", err)
+// 		os.Exit(1)
+// 	}
+//
+// 	return swayTreeJson.Dimensions.Width, swayTreeJson.Dimensions.Height
+// }
+
+type Screen struct {
+	Name string `json:"name"`
+	Rect struct {
 		Width  int `json:"width"`
+		Height int `json:"height"`
 	} `json:"rect"`
 }
 
-func getScreenDimensionsSway() (int, int) {
-	jsonBytes := swayMsgCommand(IPC_GET_TREE, "")
-
-	var swayTreeJson SwayTreeJSON
-	err := json.Unmarshal(jsonBytes, &swayTreeJson)
-	if err != nil {
-		fmt.Println("Json parse error", err)
-		os.Exit(1)
-	}
-
-	return swayTreeJson.Dimensions.Width, swayTreeJson.Dimensions.Height
-}
-
-type SwayOutputJSON struct {
-	Name string `json:"name"`
-}
-
-func getAllOutputs() []string {
+func getAllOutputs() []Screen {
 	jsonBytes := swayMsgCommand(IPC_GET_OUTPUTS, "")
 
-	var swayOutputs []SwayOutputJSON
+	var swayOutputs []Screen
 	err := json.Unmarshal(jsonBytes, &swayOutputs)
 	if err != nil {
 		fmt.Println("Json parse error", err)
 		os.Exit(1)
 	}
 
-	outputNames := []string{}
-	for _, Output := range swayOutputs {
-		outputNames = append(outputNames, Output.Name)
-	}
-
-	return outputNames
+	return swayOutputs
 }
 
 func getCurrentWallpaperDirectories() []string {
@@ -218,16 +217,14 @@ func getAllWallpaperPaths(parentDir string, result *[]string) []string {
 	return *result
 }
 
-func setWallpaperForScreen(screen string, wallpaper string) {
+func setWallpaperForScreen(screen Screen, wallpaper string) {
 	// Assume wallpaper exists
 
-	fmt.Printf("Using %s for %s\n", wallpaper, screen)
+	fmt.Printf("Using %s for %s\n", wallpaper, screen.Name)
 	// homeDir, _ := os.UserHomeDir()
 	processedWallpapersRelativeDir := ".local/processed-wallpapers"
-	wallpaperOutputPath := path.Join(processedWallpapersRelativeDir, "wallpaper-"+screen+".png")
-	lockScreenWallpaperPath := path.Join(processedWallpapersRelativeDir, "lock-screen-"+screen+".png")
-
-	screenWidth, screenHeight := getScreenDimensionsSway()
+	wallpaperOutputPath := path.Join(processedWallpapersRelativeDir, "wallpaper-"+screen.Name+".png")
+	lockScreenWallpaperPath := path.Join(processedWallpapersRelativeDir, "lock-screen-"+screen.Name+".png")
 
 	os.Stderr.WriteString("Creating lock screen wallpaper\n")
 	file, err := os.Open(wallpaper)
@@ -245,13 +242,13 @@ func setWallpaperForScreen(screen string, wallpaper string) {
 
 	imgBounds := img.Bounds()
 
-	newDesktopHeight := screenHeight
-	newDesktopWidth := (imgBounds.Dx() * screenHeight) / imgBounds.Dy()
+	newDesktopHeight := screen.Rect.Height
+	newDesktopWidth := (imgBounds.Dx() * screen.Rect.Height) / imgBounds.Dy()
 
-	newLockScreenWidth := screenWidth
-	newLockScreenHeight := (imgBounds.Dy() * screenWidth) / imgBounds.Dx()
+	newLockScreenWidth := screen.Rect.Width
+	newLockScreenHeight := (imgBounds.Dy() * screen.Rect.Width) / imgBounds.Dx()
 
-	if newLockScreenHeight < screenHeight {
+	if newLockScreenHeight < screen.Rect.Height {
 		fmt.Println("Swapping locks screen and desktop dims")
 		swap(&newDesktopHeight, &newLockScreenHeight)
 		swap(&newDesktopWidth, &newLockScreenWidth)
@@ -259,18 +256,18 @@ func setWallpaperForScreen(screen string, wallpaper string) {
 
 	screenRect := image.Rectangle{
 		Min: image.Pt(0, 0),
-		Max: image.Pt(screenWidth, screenHeight),
+		Max: image.Pt(screen.Rect.Width, screen.Rect.Height),
 	}
 
 	// Draw lock screen image
 	lockScreenFilter := gift.New(
 		gift.GaussianBlur(5.0),
 		gift.Resize(newLockScreenWidth, newLockScreenHeight, gift.LinearResampling),
-		gift.CropToSize(screenWidth, screenHeight, gift.CenterAnchor),
+		gift.CropToSize(screen.Rect.Width, screen.Rect.Height, gift.CenterAnchor),
 	)
 
-	lockScreenOutputImage := image.NewRGBA(screenRect)
-	lockScreenFilter.Draw(lockScreenOutputImage, img)
+	outputImage := image.NewRGBA(screenRect)
+	lockScreenFilter.Draw(outputImage, img)
 
 	lockScreenFile, err := os.Create(lockScreenWallpaperPath)
 	if err != nil {
@@ -279,25 +276,23 @@ func setWallpaperForScreen(screen string, wallpaper string) {
 	}
 	defer lockScreenFile.Close()
 
-	png.Encode(lockScreenFile, lockScreenOutputImage)
+	png.Encode(lockScreenFile, outputImage)
 
 	// Draw Desktop Image
 	os.Stderr.WriteString("Creating desktop wallpaper\n")
 	desktopFilter := gift.New(gift.Resize(newDesktopWidth, newDesktopHeight, gift.LinearResampling))
 
-	desktopOutputImage := image.NewRGBA(screenRect)
+	// desktopOutputImage := image.NewRGBA(screenRect)
+	// lockScreenFilter.Draw(desktopOutputImage, img)
 
-	lockScreenFilter.Draw(desktopOutputImage, img)
+	centeredOrigin := image.Pt(screen.Rect.Width/2-newDesktopWidth/2, screen.Rect.Height/2-newDesktopHeight/2)
+	desktopFilter.DrawAt(outputImage, img, centeredOrigin, gift.OverOperator)
 
-	centeredOrigin := image.Pt(screenWidth/2-newDesktopWidth/2, screenHeight/2-newDesktopHeight/2)
-	desktopFilter.DrawAt(desktopOutputImage, img, centeredOrigin, gift.OverOperator)
-
-	fmt.Printf("              Image dims: (%d, %d)\n", imgBounds.Dx(), imgBounds.Dy())
-	fmt.Printf("             Screen dims: (%d, %d)\n", screenWidth, screenHeight)
-	fmt.Printf("        Lock screen dims: (%d, %d)\n", newLockScreenWidth, newLockScreenHeight)
-	fmt.Printf("            Desktop dims: (%d, %d)\n", newDesktopWidth, newDesktopHeight)
-	fmt.Printf("Lock screen image bounds: %+v\n", lockScreenOutputImage.Bounds())
-	fmt.Printf("    Desktop image bounds: %+v\n", desktopOutputImage.Bounds())
+	fmt.Printf("         Image dims: (%d, %d)\n", imgBounds.Dx(), imgBounds.Dy())
+	fmt.Printf("        Screen dims: (%d, %d)\n", screen.Rect.Width, screen.Rect.Height)
+	fmt.Printf("   Lock screen dims: (%d, %d)\n", newLockScreenWidth, newLockScreenHeight)
+	fmt.Printf("       Desktop dims: (%d, %d)\n", newDesktopWidth, newDesktopHeight)
+	fmt.Printf("Output image bounds: %+v\n", outputImage.Bounds())
 
 	fmt.Printf("  Lock screen bounds after filter: %+v\n", lockScreenFilter.Bounds(imgBounds))
 	fmt.Printf("Desktop image bounds after filter: %+v\n", desktopFilter.Bounds(imgBounds))
@@ -308,9 +303,10 @@ func setWallpaperForScreen(screen string, wallpaper string) {
 		os.Exit(1)
 	}
 	defer desktopFile.Close()
-	png.Encode(desktopFile, desktopOutputImage)
+	png.Encode(desktopFile, outputImage)
 
 	// TODO: Drop shadow
+	// https://en.wikipedia.org/wiki/Drop_shadow
 	// maybeDropShadowFilter := gift.New(
 	// 	gift.GaussianBlur(5.0), // Apply a blur to simulate shadow
 	// 	gift.ColorFunc(func(r, g, b, a float32) (rf, gf, bf, af float32) {
@@ -319,7 +315,7 @@ func setWallpaperForScreen(screen string, wallpaper string) {
 	// )
 
 	fmt.Println("Updating output to", screen, wallpaperOutputPath)
-	swayMsgCommand(IPC_COMMAND, fmt.Sprintf("output \"%s\" bg \"%s\" fit", screen, wallpaperOutputPath))
+	swayMsgCommand(IPC_COMMAND, fmt.Sprintf("output \"%s\" bg \"%s\" fit", screen.Name, wallpaperOutputPath))
 }
 
 func main() {
@@ -345,16 +341,24 @@ func main() {
 			}
 		}
 	} else {
-		output := os.Args[1]
+		outputName := os.Args[1]
 		wallpaper := ""
 		if len(os.Args) > 2 {
 			wallpaper = os.Args[2]
 		}
 
-		if slices.Contains(outputs, output) {
-			fmt.Println(output, "is not a valid output. Options are:", outputs)
+		// outputNames := []string{}
+		// for _, Output := range swayOutputs {
+		// 	outputNames = append(outputNames, Output.Name)
+		// }
+
+		outputIndex := slices.IndexFunc(outputs, func(screen Screen) bool { return screen.Name == outputName })
+		if outputIndex >= 0 {
+			fmt.Println(outputName, "is not a valid output. Options are:", outputs)
 			os.Exit(1)
 		}
+
+		output := outputs[outputIndex]
 
 		if slices.Contains(wallpapers, wallpaper) {
 			fmt.Println("Wallpaper", wallpaper, "does not exist in path")
