@@ -1,37 +1,39 @@
 package main
 
+// TODO
+//  Get from environment variable
+//   - config file that specifies all wallpaper directories (or just the directories themselves)
+//   - processed-wallpapers directory
+//   - wallpapers directory
+
 import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"image"
+	// "image/color"
+	"image/png"
 	"math/rand"
 	"net"
 	"os"
-	"os/exec"
+	"path"
 	"strings"
 	"time"
 	"unsafe"
 
+	"github.com/disintegration/gift"
 	"golang.org/x/exp/slices"
 )
+
+func swap[T any](first, second *T) {
+	temp := *first
+	*first = *second
+	*second = temp
+}
 
 func ensureDirExists(dir string) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		os.Mkdir(dir, 0755)
-	}
-}
-
-// TODO: Do image manipulation with an internal go library
-func imageMagik(cmd ...string) {
-	// NOTE convert is VERY slow
-	convertCommand := exec.Command("convert", cmd...)
-	convertCommand.Stdout = os.Stdout
-	convertCommand.Stderr = os.Stderr
-
-	err := convertCommand.Run()
-	if err != nil {
-		fmt.Println("Error executing first convert command", err)
-		os.Exit(1)
 	}
 }
 
@@ -78,23 +80,24 @@ const (
 	IPC_EVENT_INPUT            = ((1 << 31) | 21)
 )
 
-func swayMsgCommand(msgType messageType) []byte {
+func swayMsgCommand(msgType messageType, payload string) []byte {
 	const i3MagicString = "i3-ipc"
 	const IPC_HEADER_SIZE = (uintptr(len(i3MagicString)) + 2*unsafe.Sizeof(int32(0)))
 
-	var socketPath string = os.Getenv("SWAYSOCK")
+	socketPath := os.Getenv("SWAYSOCK")
 	connection, err := net.Dial("unix", socketPath)
 	if err != nil {
 		fmt.Println("Unable to create connection", err)
 		return []byte{}
 	}
 
-	length := int32(0)
+	length := uint32(len(payload))
 	var lengthAndType [8]byte
-	binary.LittleEndian.PutUint32(lengthAndType[0:4], uint32(length))
+	binary.LittleEndian.PutUint32(lengthAndType[0:4], length)
 	binary.LittleEndian.PutUint32(lengthAndType[4:8], uint32(msgType))
 	message := append([]byte(i3MagicString), lengthAndType[:]...)
 	connection.Write(message)
+	connection.Write([]byte(payload))
 
 	responseHeader := make([]byte, IPC_HEADER_SIZE)
 	_, err = connection.Read(responseHeader)
@@ -124,7 +127,7 @@ type SwayTreeJSON struct {
 }
 
 func getScreenDimensionsSway() (int, int) {
-	jsonBytes := swayMsgCommand(IPC_GET_TREE)
+	jsonBytes := swayMsgCommand(IPC_GET_TREE, "")
 
 	var swayTreeJson SwayTreeJSON
 	err := json.Unmarshal(jsonBytes, &swayTreeJson)
@@ -133,9 +136,7 @@ func getScreenDimensionsSway() (int, int) {
 		os.Exit(1)
 	}
 
-	screenWidth, screenHeight := swayTreeJson.Dimensions.Width, swayTreeJson.Dimensions.Height
-
-	return screenWidth, screenHeight
+	return swayTreeJson.Dimensions.Width, swayTreeJson.Dimensions.Height
 }
 
 type SwayOutputJSON struct {
@@ -143,7 +144,7 @@ type SwayOutputJSON struct {
 }
 
 func getAllOutputs() []string {
-	jsonBytes := swayMsgCommand(IPC_GET_OUTPUTS)
+	jsonBytes := swayMsgCommand(IPC_GET_OUTPUTS, "")
 
 	var swayOutputs []SwayOutputJSON
 	err := json.Unmarshal(jsonBytes, &swayOutputs)
@@ -162,9 +163,9 @@ func getAllOutputs() []string {
 
 func getCurrentWallpaperDirectories() []string {
 	homeDir, _ := os.UserHomeDir()
-	defaultWallpaperDirectory := homeDir + "/wallpapers"
+	defaultWallpaperDirectory := path.Join(homeDir, "wallpapers")
 	result := []string{}
-	wallpaperParentDirFile := homeDir + "/.config/wallpaper-directories"
+	wallpaperParentDirFile := path.Join(homeDir, ".config/wallpaper-directories")
 
 	if _, err := os.Stat(wallpaperParentDirFile); !os.IsNotExist(err) {
 		pathBytes, err := os.ReadFile(wallpaperParentDirFile)
@@ -205,7 +206,7 @@ func getAllWallpaperPaths(parentDir string, result *[]string) []string {
 	for _, file := range files {
 		fileName := file.Name()
 		if !strings.HasPrefix(fileName, ".") {
-			filePath := parentDir + "/" + fileName
+			filePath := path.Join(parentDir, fileName)
 			if stat, err := os.Stat(filePath); !os.IsNotExist(err) && stat.IsDir() {
 				getAllWallpaperPaths(filePath, result)
 			} else {
@@ -220,41 +221,105 @@ func getAllWallpaperPaths(parentDir string, result *[]string) []string {
 func setWallpaperForScreen(screen string, wallpaper string) {
 	// Assume wallpaper exists
 
-	homeDir, _ := os.UserHomeDir()
-	processedWallpapersDir := homeDir + "/.local/processed-wallpapers"
-	wallpaperOutputPath := processedWallpapersDir + "/wallpaper-" + screen + ".png"
-	lockScreenWallpaperPath := processedWallpapersDir + "/lock-screen-" + screen + ".png"
-	width, height := getScreenDimensionsSway()
+	fmt.Printf("Using %s for %s\n", wallpaper, screen)
+	// homeDir, _ := os.UserHomeDir()
+	processedWallpapersRelativeDir := ".local/processed-wallpapers"
+	wallpaperOutputPath := path.Join(processedWallpapersRelativeDir, "wallpaper-"+screen+".png")
+	lockScreenWallpaperPath := path.Join(processedWallpapersRelativeDir, "lock-screen-"+screen+".png")
 
-	screenDimensions := fmt.Sprintf("%dx%d", width, height)
+	screenWidth, screenHeight := getScreenDimensionsSway()
 
 	os.Stderr.WriteString("Creating lock screen wallpaper\n")
-	imageMagik(
-		"-gravity", "center",
-		"-crop", "16:9", // TODO: aspect ratio calculation
-		"-resize", fmt.Sprintf("%dx%d", width/10, height/10),
-		"-filter", "Gaussian",
-		"-blur", "0x2.5",
-		"-resize", screenDimensions+"^",
-		wallpaper, lockScreenWallpaperPath)
+	file, err := os.Open(wallpaper)
+	if err != nil {
+		fmt.Printf("Could not load file \"%s\" with error: %+v\n", wallpaper, err)
+		os.Exit(1)
+	}
+	defer file.Close()
 
+	img, _ /* format_name */, err := image.Decode(file)
+	if err != nil {
+		fmt.Printf("Could not decode image \"%s\" with error: %+v\n", wallpaper, err)
+		os.Exit(1)
+	}
+
+	imgBounds := img.Bounds()
+
+	newDesktopHeight := screenHeight
+	newDesktopWidth := (imgBounds.Dx() * screenHeight) / imgBounds.Dy()
+
+	newLockScreenWidth := screenWidth
+	newLockScreenHeight := (imgBounds.Dy() * screenWidth) / imgBounds.Dx()
+
+	if newLockScreenHeight < screenHeight {
+		fmt.Println("Swapping locks screen and desktop dims")
+		swap(&newDesktopHeight, &newLockScreenHeight)
+		swap(&newDesktopWidth, &newLockScreenWidth)
+	}
+
+	screenRect := image.Rectangle{
+		Min: image.Pt(0, 0),
+		Max: image.Pt(screenWidth, screenHeight),
+	}
+
+	// Draw lock screen image
+	lockScreenFilter := gift.New(
+		gift.GaussianBlur(5.0),
+		gift.Resize(newLockScreenWidth, newLockScreenHeight, gift.LinearResampling),
+		gift.CropToSize(screenWidth, screenHeight, gift.CenterAnchor),
+	)
+
+	lockScreenOutputImage := image.NewRGBA(screenRect)
+	lockScreenFilter.Draw(lockScreenOutputImage, img)
+
+	lockScreenFile, err := os.Create(lockScreenWallpaperPath)
+	if err != nil {
+		fmt.Printf("Could not create image at \"%s\". Error: %+v\n", lockScreenWallpaperPath, err)
+		os.Exit(1)
+	}
+	defer lockScreenFile.Close()
+
+	png.Encode(lockScreenFile, lockScreenOutputImage)
+
+	// Draw Desktop Image
 	os.Stderr.WriteString("Creating desktop wallpaper\n")
-	imageMagik(
-		"-gravity", "center",
-		"(", wallpaper, "-resize", screenDimensions, ")",
-		"(", "+clone", "-background", "black", "-shadow", "60x10+20+20", ")",
-		"+swap",
-		"-compose", "over", "-composite",
-		"(", lockScreenWallpaperPath, "-resize", screenDimensions+"^", ")",
-		"+swap",
-		"-compose", "over", "-composite",
-		wallpaperOutputPath)
+	desktopFilter := gift.New(gift.Resize(newDesktopWidth, newDesktopHeight, gift.LinearResampling))
+
+	desktopOutputImage := image.NewRGBA(screenRect)
+
+	lockScreenFilter.Draw(desktopOutputImage, img)
+
+	centeredOrigin := image.Pt(screenWidth/2-newDesktopWidth/2, screenHeight/2-newDesktopHeight/2)
+	desktopFilter.DrawAt(desktopOutputImage, img, centeredOrigin, gift.OverOperator)
+
+	fmt.Printf("              Image dims: (%d, %d)\n", imgBounds.Dx(), imgBounds.Dy())
+	fmt.Printf("             Screen dims: (%d, %d)\n", screenWidth, screenHeight)
+	fmt.Printf("        Lock screen dims: (%d, %d)\n", newLockScreenWidth, newLockScreenHeight)
+	fmt.Printf("            Desktop dims: (%d, %d)\n", newDesktopWidth, newDesktopHeight)
+	fmt.Printf("Lock screen image bounds: %+v\n", lockScreenOutputImage.Bounds())
+	fmt.Printf("    Desktop image bounds: %+v\n", desktopOutputImage.Bounds())
+
+	fmt.Printf("  Lock screen bounds after filter: %+v\n", lockScreenFilter.Bounds(imgBounds))
+	fmt.Printf("Desktop image bounds after filter: %+v\n", desktopFilter.Bounds(imgBounds))
+
+	desktopFile, err := os.Create(wallpaperOutputPath)
+	if err != nil {
+		fmt.Printf("Could not create image at \"%s\". Error: %+v\n", wallpaperOutputPath, err)
+		os.Exit(1)
+	}
+	defer desktopFile.Close()
+	png.Encode(desktopFile, desktopOutputImage)
+
+	// TODO: Drop shadow
+	// maybeDropShadowFilter := gift.New(
+	// 	gift.GaussianBlur(5.0), // Apply a blur to simulate shadow
+	// 	gift.ColorFunc(func(r, g, b, a float32) (rf, gf, bf, af float32) {
+	// 		return float32(0), float32(0), float32(0), 1.0
+	// 	}),
+	// )
 
 	fmt.Println("Updating output to", screen, wallpaperOutputPath)
-	swayMsgCommand := exec.Command("swaymsg", "output", screen, "bg", wallpaperOutputPath, "fit")
-	swayMsgCommand.Stdout = os.Stdout
-	swayMsgCommand.Stderr = os.Stderr
-	swayMsgCommand.Run()
+	swayMsgCommand(IPC_COMMAND, fmt.Sprintf("output \"%s\" bg \"%s\" fit", screen, wallpaperOutputPath))
 }
 
 func main() {
@@ -267,7 +332,7 @@ func main() {
 	}
 
 	homeDir, _ := os.UserHomeDir()
-	processedWallpapersDir := homeDir + "/.local/processed-wallpapers"
+	processedWallpapersDir := path.Join(homeDir, ".local/processed-wallpapers")
 	ensureDirExists(processedWallpapersDir)
 
 	if len(os.Args) <= 1 {
